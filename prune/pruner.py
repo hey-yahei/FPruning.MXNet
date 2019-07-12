@@ -91,7 +91,6 @@ class PrunerManager(object):
                 if m not in share_mask:
                     channels = m.weight.shape[0]
                     masks[m] = nd.ones(shape=(1, channels, 1, 1), ctx=m.weight.list_ctx()[0])
-
                 # Reset forward function
                 def _forward(self_, *args, **kwargs):
                     nonlocal masks, share_mask
@@ -104,6 +103,7 @@ class PrunerManager(object):
                 m.origin_forward = m.hybrid_forward
                 m.hybrid_forward = types.MethodType(_forward, m)
         _ = net.apply(_add_mask_to_other_conv)
+
         # Store attributes
         self.masks = masks
         self.share_masks = share_mask
@@ -127,3 +127,33 @@ class PrunerManager(object):
             th_idx = np.argsort(abs_mean)[int(per * abs_mean.shape[0])]
             mask = (abs_mean >= abs_mean[th_idx]).astype("float32")
             self.masks[m] = nd.array(mask, ctx=conv.weight.list_ctx()[0]).reshape(1, -1, 1, 1)
+
+    def prune_by_std(self, s=0.25):
+        """ Prune filters with std """
+        for m, msk in self.masks.items():
+            conv = self.conv_bn.get_conv(m) if isinstance(m, nn.BatchNorm) else m
+            weight = conv.weight.data().asnumpy()
+            th = np.std(weight) * s
+            abs_mean = abs(weight).mean(axis=(1, 2, 3))
+            mask = (abs_mean >= th).astype("float32")
+            self.masks[m] = nd.array(mask, ctx=conv.weight.list_ctx()[0]).reshape(1, -1, 1, 1)
+
+    def get_sparsity(self):
+        result = {}
+        for m, mask in self.masks.items():
+            if isinstance(m, nn.BatchNorm):
+                m = self.conv_bn.get_conv(m)
+            result[m.name] = 1. - mask.asnumpy().mean()
+        for m, sm in self.share_masks.items():
+            if isinstance(m, nn.BatchNorm):
+                m = self.conv_bn.get_conv(m)
+            result[m.name] = 1. - self.masks[sm].asnumpy().mean()
+        return result
+
+    def get_params_sparsity(self):
+        total_pruned = 0
+        total_params = 0
+        for m, mask in self.masks.items():
+            if isinstance(m, nn.BatchNorm):
+                m = self.conv_bn.get_conv(m)
+            total_params += m.weight.shape

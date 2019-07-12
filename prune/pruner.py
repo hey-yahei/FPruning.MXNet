@@ -29,7 +29,7 @@ from mxnet.gluon import nn
 
 from . import utils
 
-__all__ = ['PrunerManager']
+__all__ = ['Pruner', 'L1RankPruner', 'PrunerManager']
 __author__ = 'YaHei'
 
 
@@ -46,114 +46,112 @@ class _ChannelMask(autograd.Function):
         return dy * self.mask
 
 
-class PrunerManager(object):
-    def __init__(self, net, exclude=[], share_mask={}):
-        # Collection for masks of net
-        masks = {}
-        # Collection for  convolutions which have been dealed with
-        visited_conv = []
-        # Collect convoluion-bn pairs
-        conv_bn = utils.get_conv_bn_pairs(net)
+class Pruner(object):
+    def __init__(self, pruned_conv, mask_output, share_mask=None):
+        self.pruned_conv = pruned_conv
+        self.mask_output = mask_output
+        self.share_mask = share_mask
 
-        """ Firstly, add mask to all batchnorm """
-        def _add_mask_to_bn(m):
-            nonlocal masks, share_mask, visited_conv, conv_bn
-            if isinstance(m, nn.BatchNorm):
-                # Get corresponding convolution
-                conv = conv_bn.get_conv(m)
-                # If exclude such a convoluton
-                if conv in exclude:
-                    return
-                # Create a init mask if not share
-                if m not in share_mask:
-                    channels = m.gamma.shape[0]
-                    masks[m] = nd.ones(shape=(1, channels, 1, 1), ctx=m.gamma.list_ctx()[0])
-                # Reset forward function
-                def _forward(self_, *args, **kwargs):
-                    nonlocal masks, share_mask
-                    # Normal forward
-                    out = self_.origin_forward(*args, **kwargs)
-                    # Get mask and apply to outputs
-                    share = share_mask.get(m)
-                    mask = masks[m] if share is None else masks[share]
-                    return _ChannelMask(mask)(out)
-                m.origin_forward = m.hybrid_forward
-                m.hybrid_forward = types.MethodType(_forward, m)
-                # Add convolution to visited list
-                visited_conv.append(conv)
-        _ = net.apply(_add_mask_to_bn)
+        if share_mask is None:
+            weight = pruned_conv.weight
+            self.mask = nd.ones(shape=(1, weight.shape[0], 1, 1), ctx=weight.list_ctx()[0])
+        else:
+            self.mask = None
 
-        """ Secondly, add mask to other convolutions """
-        def _add_mask_to_other_conv(m):
-            nonlocal masks, share_mask, visited_conv
-            if all((isinstance(m, nn.Conv2D), m not in exclude, m not in visited_conv)):
-                # Create a init mask if not share
-                if m not in share_mask:
-                    channels = m.weight.shape[0]
-                    masks[m] = nd.ones(shape=(1, channels, 1, 1), ctx=m.weight.list_ctx()[0])
-                # Reset forward function
-                def _forward(self_, *args, **kwargs):
-                    nonlocal masks, share_mask
-                    # Normal forward
-                    out = self_.origin_forward(*args, **kwargs)
-                    # Get mask and apply to outputs
-                    share = share_mask.get(m)
-                    mask = masks[m] if share is None else masks[share]
-                    return _ChannelMask()(out, mask)
-                m.origin_forward = m.hybrid_forward
-                m.hybrid_forward = types.MethodType(_forward, m)
-        _ = net.apply(_add_mask_to_other_conv)
+        def _forward(self_, *args, **kwargs):
+            mask = self.share_mask.mask if self.share_mask is not None else self.mask
+            out = self_.origin_forward(*args, **kwargs)
+            return _ChannelMask(mask)(out)
+        mask_output.origin_forward = mask_output.hybrid_forward
+        mask_output.hybrid_forward = types.MethodType(_forward, mask_output)
 
-        # Store attributes
-        self.masks = masks
-        self.share_masks = share_mask
-        self.conv_bn = conv_bn
+    def analyse(self, out_size):
+        oc, ic, kh, kw = self.pruned_conv.weight.shape
+        pc = oc - self.mask.sum().asscalar()
+        total_params = oc * ic * kh * kw
+        pruned_params = pc * ic * kh * kw
 
-    def prune_by_threshold(self, th):
-        """ Prune filters with threshold """
-        for m, mask in self.masks.items():
-            conv = self.conv_bn.get_conv(m) if isinstance(m, nn.BatchNorm) else m
-            weight = conv.weight.data().asnumpy()
-            abs_mean = abs(weight).mean(axis=(1, 2, 3))
-            mask = (abs_mean >= th).astype("float32")
-            self.masks[m] = nd.array(mask, ctx=conv.weight.list_ctx()[0]).reshape(1, -1, 1, 1)
+        oh, ow = out_size
+        total_mac = oh * ow * oc * kw * kh * ic
+        pruned_mac = oh * ow * pc * kw * kh * ic
 
-    def prune_by_percent(self, per):
-        """ Prune filters with percent """
-        for m, mask in self.masks.items():
-            conv = self.conv_bn.get_conv(m) if isinstance(m, nn.BatchNorm) else m
-            weight = conv.weight.data().asnumpy()
-            abs_mean = abs(weight).mean(axis=(1, 2, 3))
-            th_idx = np.argsort(abs_mean)[int(per * abs_mean.shape[0])]
-            mask = (abs_mean >= abs_mean[th_idx]).astype("float32")
-            self.masks[m] = nd.array(mask, ctx=conv.weight.list_ctx()[0]).reshape(1, -1, 1, 1)
+        return (pc, oc), (pruned_params, total_params), (pruned_mac, total_mac)
+
+    def default_prune(self):
+        raise NotImplementedError()
+
+
+class L1RankPruner(Pruner):
+    def __init__(self, pruned_conv, mask_output, share_mask=None):
+        super(L1RankPruner, self).__init__(pruned_conv, mask_output, share_mask)
+        self.default_prune = self.prune_by_std
 
     def prune_by_std(self, s=0.25):
-        """ Prune filters with std """
-        for m, msk in self.masks.items():
-            conv = self.conv_bn.get_conv(m) if isinstance(m, nn.BatchNorm) else m
-            weight = conv.weight.data().asnumpy()
-            th = np.std(weight) * s
-            abs_mean = abs(weight).mean(axis=(1, 2, 3))
-            mask = (abs_mean >= th).astype("float32")
-            self.masks[m] = nd.array(mask, ctx=conv.weight.list_ctx()[0]).reshape(1, -1, 1, 1)
+        ctx = self.pruned_conv.weight.list_ctx()[0]
+        weight = self.pruned_conv.weight.data()
+        th = np.std(weight.asnumpy()) * s
+        th = nd.array([th], ctx=ctx)
+        abs_mean = weight.abs().mean(axis=(1, 2, 3))
+        self.mask = (abs_mean >= th).reshape(1, -1, 1, 1)
 
-    def get_sparsity(self):
-        result = {}
-        for m, mask in self.masks.items():
-            if isinstance(m, nn.BatchNorm):
-                m = self.conv_bn.get_conv(m)
-            result[m.name] = 1. - mask.asnumpy().mean()
-        for m, sm in self.share_masks.items():
-            if isinstance(m, nn.BatchNorm):
-                m = self.conv_bn.get_conv(m)
-            result[m.name] = 1. - self.masks[sm].asnumpy().mean()
-        return result
 
-    def get_params_sparsity(self):
-        total_pruned = 0
-        total_params = 0
-        for m, mask in self.masks.items():
-            if isinstance(m, nn.BatchNorm):
-                m = self.conv_bn.get_conv(m)
-            total_params += m.weight.shape
+class PrunerManager(object):
+    def __init__(self, net):
+        self.pruner_list = []
+        self.out_size = {}
+        self._net = net
+
+    def build(self, in_shape):
+        mapper = {pruner.pruned_conv: pruner for pruner in self.pruner_list}
+        for pruner in self.pruner_list:
+            conv = pruner.share_mask
+            if conv is not None:
+                pruner.share_mask = mapper[conv]
+
+        self._get_outsize(in_shape)
+
+    def add(self, pruner):
+        self.pruner_list.append(pruner)
+
+    def compose(self, *pruners):
+        self.pruner_list.extend(pruners)
+
+    def apply(self, func):
+        for pruner in self.pruner_list:
+            func(pruner)
+
+    def prune(self, *args, **kwargs):
+        for pruner in self.pruner_list:
+            pruner.default_prune(*args, **kwargs)
+
+    def analyse(self):
+        assert self.out_size is not None, "Please run get_outsize() to collect output shape of convolutions."
+
+        pruned_params, total_params, pruned_mac, total_mac = 0, 0, 0, 0
+        for pruner in self.pruner_list:
+            _, (pp, tp), (pm, tm) = pruner.analyse(self.out_size[pruner])
+            pruned_params += pp
+            total_params += tp
+            pruned_mac += pm
+            total_mac += tm
+
+        return pruned_params / total_params, pruned_mac / total_mac
+
+    def _get_outsize(self, in_shape):
+        hooks = []
+        for pruner in self.pruner_list:
+            def _generate_hook(pruner):
+                def _hook(m, x, y):
+                    shape = y.shape
+                    self.out_size[pruner] = (shape[2], shape[3])
+                return _hook
+            h = pruner.mask_output.register_forward_hook(_generate_hook(pruner))
+            # print(id(_hook))
+            hooks.append(h)
+
+        ctx = self.pruner_list[0].pruned_conv.weight.list_ctx()[0]
+        in_ = nd.zeros(shape=in_shape, ctx=ctx)
+        _ = self._net(in_)
+
+        for h in hooks:
+            h.detach()

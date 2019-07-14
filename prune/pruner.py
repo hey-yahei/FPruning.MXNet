@@ -26,7 +26,7 @@ import numpy as np
 
 from mxnet import nd, autograd
 
-__all__ = ['Pruner', 'L1RankPruner', 'PrunerManager']
+__all__ = ['Pruner', 'PrunerManager']
 __author__ = 'YaHei'
 
 
@@ -102,27 +102,6 @@ class Pruner(object):
     def default_prune(self):
         """ The default pruning API """
         raise NotImplementedError()
-
-
-class L1RankPruner(Pruner):
-    def __init__(self, pruned_conv, mask_output, share_mask=None):
-        """ L1-rank pruner, refer to Pruner """
-        super(L1RankPruner, self).__init__(pruned_conv, mask_output, share_mask)
-        self.default_prune = self.prune_by_std
-
-    def prune_by_std(self, s=0.25):
-        """
-        Prune with the sensitivity as threshold for L1-rank.
-        $sensitivity = std(weight) * s$
-        :param s: float
-            the factor in sensitivity
-        """
-        ctx = self.pruned_conv.weight.list_ctx()[0]
-        weight = self.pruned_conv.weight.data()
-        th = np.std(weight.asnumpy()) * s
-        th = nd.array([th], ctx=ctx)
-        abs_mean = weight.abs().mean(axis=(1, 2, 3))
-        self.mask = (abs_mean >= th).reshape(1, -1, 1, 1)
 
 
 class PrunerManager(object):

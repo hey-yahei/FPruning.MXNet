@@ -27,28 +27,30 @@ from mxnet import autograd, nd
 
 from .pruner import Pruner
 
-__all__ = ['ActivationRankPruner', 'ActivationAPoZRankPruner']
+__all__ = ['ActivationRankPruner', 'ActivationAPoZRankPruner', 'ActivationEntropyRankPruner']
 __author__ = 'YaHei'
 
-ActivationRankPruner = Pruner
+
+class ActivationRankPruner(Pruner):
+    def __init__(self, pruned_conv, mask_output, act_blk):
+        super(ActivationRankPruner, self).__init__(pruned_conv, mask_output)
+        self.act_blk = act_blk
+
 
 class ActivationAPoZRankPruner(ActivationRankPruner):
     """ Reference: https://arxiv.org/abs/1607.03250 """
     def __init__(self, pruned_conv, mask_output, act_blk):
         """ APoZ-rank pruner, refer to Pruner """
-        super(ActivationAPoZRankPruner, self).__init__(pruned_conv, mask_output)
-        self.default_prune = self.prune_by_std
+        super(ActivationAPoZRankPruner, self).__init__(pruned_conv, mask_output, act_blk)
+        self.default_prune = self.prune_by_percent
 
-        self.act_blk = act_blk
-        self._channels = pruned_conv.weight.shape[0]
-        self.APoZs = np.zeros(shape=self._channels)
+        self.clear_state()
         def _hook(m, x, y):
             if not autograd.is_training():
                 batch_mean = (y == 0).mean(axis=(2, 3)).asnumpy()
                 for mean in batch_mean:
                     self.APoZs = 0.01 * mean + 0.99 * self.APoZs
         act_blk.register_forward_hook(_hook)
-
 
     def clear_state(self):
         """
@@ -73,14 +75,12 @@ class ActivationAPoZRankPruner(ActivationRankPruner):
 
 
 class ActivationEntropyRankPruner(ActivationRankPruner):
-    """ Reference: hhttp://arxiv.org/abs/1706.05791 """
+    """ Reference: http://arxiv.org/abs/1706.05791 """
     def __init__(self, pruned_conv, mask_output, act_blk):
         """ Entropy-rank pruner, refer to Pruner """
-        super(ActivationEntropyRankPruner, self).__init__(pruned_conv, mask_output)
-        self.default_prune = self.prune_by_std
+        super(ActivationEntropyRankPruner, self).__init__(pruned_conv, mask_output, act_blk)
+        self.default_prune = self.prune_by_percent
 
-        self.act_blk = act_blk
-        self._channels = pruned_conv.weight.shape[0]
         self.global_means = []
         def _hook(m, x, y):
             if not autograd.is_training():
@@ -98,7 +98,7 @@ class ActivationEntropyRankPruner(ActivationRankPruner):
         entropys = []
         for bin in data2bin.swapaxes(0, 1):
             count = np.bincount(bin, minlength=bins)
-            prob = count / bin.size
+            prob = count.astype("float32") / bin.size
             entropys.append(-sum(prob * np.log(prob)))
 
         self.global_means.clear()

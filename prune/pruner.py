@@ -58,6 +58,7 @@ class Pruner(object):
         self.pruned_conv = pruned_conv
         self.mask_output = mask_output
         self.share_mask = share_mask
+        self._channels = pruned_conv.weight.shape[0]
 
         """ Initialize a mask if not share """
         if share_mask is None:

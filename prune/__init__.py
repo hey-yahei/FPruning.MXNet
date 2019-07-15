@@ -5,3 +5,5 @@ from .pruner import *
 from .weight_rank_pruner import *
 
 from .activation_rank_pruner import *
+
+from .gradient_rank_pruner import *

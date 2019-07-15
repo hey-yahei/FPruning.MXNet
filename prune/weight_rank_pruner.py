@@ -21,19 +21,23 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+import numpy as np
+
+from mxnet import nd
+
 from .pruner import Pruner
 
-__all__ = ['WeightRankPruner', 'L1RankPruner']
+__all__ = ['WeightRankPruner', 'WeightL1RankPruner']
 __author__ = 'YaHei'
 
 WeightRankPruner = Pruner
 
 
-class L1RankPruner(WeightRankPruner):
+class WeightL1RankPruner(WeightRankPruner):
     """ Reference: https://arxiv.org/abs/1608.08710 """
     def __init__(self, pruned_conv, mask_output, share_mask=None):
         """ L1-rank pruner, refer to Pruner """
-        super(L1RankPruner, self).__init__(pruned_conv, mask_output, share_mask)
+        super(WeightL1RankPruner, self).__init__(pruned_conv, mask_output, share_mask)
         self.default_prune = self.prune_by_std
 
     def prune_by_std(self, s=0.25):

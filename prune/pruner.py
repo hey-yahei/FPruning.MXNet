@@ -189,7 +189,6 @@ class PrunerManager(object):
                     self.out_size[pruner] = (shape[2], shape[3])
                 return _hook
             h = pruner.mask_output.register_forward_hook(_generate_hook(pruner))
-            # print(id(_hook))
             hooks.append(h)
 
         ctx = self.pruner_list[0].pruned_conv.weight.list_ctx()[0]

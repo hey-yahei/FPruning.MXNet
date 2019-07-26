@@ -47,6 +47,9 @@ class WeightL1RankPruner(WeightRankPruner):
         :param s: float
             the factor in sensitivity
         """
+        if self.share_mask is not None:
+            return
+
         ctx = self.pruned_conv.weight.list_ctx()[0]
         weight = self.pruned_conv.weight.data()
         th = np.std(weight.asnumpy()) * s

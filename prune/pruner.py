@@ -22,7 +22,6 @@
 # SOFTWARE.
 
 import types
-import numpy as np
 
 from mxnet import nd, autograd
 
@@ -88,9 +87,10 @@ class Pruner(object):
             pruned_mac: int, the number of MAC(Multiply-ACcumulator) in pruned model
             total_mac: int, the number of MAC(Multiply-ACcumulator) in origin model
         """
+        mask = self.share_mask.mask if self.share_mask is not None else self.mask
         # Calculate the number of parameters
         oc, ic, kh, kw = self.pruned_conv.weight.shape
-        pc = oc - self.mask.sum().asscalar()
+        pc = oc - mask.sum().asscalar()
         total_params = oc * ic * kh * kw
         pruned_params = pc * ic * kh * kw
         # Calculate the MAC
@@ -179,6 +179,15 @@ class PrunerManager(object):
             total_mac += tm
 
         return pruned_params / total_params, pruned_mac / total_mac
+
+    def group_lasso(self):
+        reg = []
+        for pruner in self.pruner_list:
+            w = pruner.pruned_conv.weight.data()
+            mask = pruner.share_mask.mask if pruner.share_mask is not None else pruner.mask
+            square_sum = (w ** 2).sum(axis=(1, 2, 3)).sqrt()
+            reg.append(_ChannelMask(mask.reshape(-1))(square_sum).sum())
+        return sum(reg)
 
     def _get_outsize(self, in_shape):
         """ Collect the output shape of feature maps """

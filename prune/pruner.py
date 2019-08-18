@@ -89,7 +89,8 @@ class Pruner(object):
         """
         mask = self.share_mask.mask if self.share_mask is not None else self.mask
         # Calculate the number of parameters
-        oc, ic, kh, kw = self.pruned_conv.weight.shape
+        oc, _, kh, kw = self.pruned_conv.weight.shape
+        ic = self.in_channels
         pc = oc - mask.sum().asscalar()
         total_params = oc * ic * kh * kw
         pruned_params = pc * ic * kh * kw
@@ -160,6 +161,20 @@ class PrunerManager(object):
         """ Apply prune via default_prune APIs """
         for pruner in self.pruner_list:
             pruner.default_prune(*args, **kwargs)
+        self.infer_in_channels_at_next_batch()
+
+    def infer_in_channels_at_next_batch(self):
+        """ Infer the real number of in_channels via input_data at next batch """
+        def _add_hook(pruner):
+            hook = None
+            def _infer_pre_hook(m, x):
+                nonlocal hook
+                x = x[0]
+                x_sum = x.abs().sum(axis=(0, 2, 3))
+                pruner.in_channels = (x_sum != 0).sum().asscalar()
+                hook.detach()
+            hook = pruner.pruned_conv.register_forward_pre_hook(_infer_pre_hook)
+        self.apply(_add_hook)
 
     def analyse(self):
         """
